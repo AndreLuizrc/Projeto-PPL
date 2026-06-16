@@ -1,3 +1,11 @@
+/* ---- Tempo de execucao sequencial --------
+    real    0m24.137s
+    user    0m0.015s
+    sys     0m0.062s
+*/
+
+
+
 /**
  * @file k_means_clustering.c
  * @brief K Means Clustering Algorithm implemented
@@ -384,7 +392,7 @@ void test2()
 int main()
 {
     srand(time(NULL));
-    test();
-    /* test2(); */
+    // test();
+    test2(); 
     return 0;
 }
