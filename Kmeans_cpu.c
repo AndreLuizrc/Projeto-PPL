@@ -1,9 +1,44 @@
 /* ---- Tempo de execucao sequencial --------
-    real    0m24.137s
+    real    0m17.850s
     user    0m0.015s
-    sys     0m0.062s
+    sys     0m0.061s
 */
 
+/* ---- Tempo paralelo 1 thread --------
+    real    0m17.833s
+    user    0m0.015s
+    sys     0m0.093s
+*/
+
+/* ---- Tempo paralelo 2 threads --------
+    real    0m17.132s
+    user    0m0.030s
+    sys     0m0.046s
+*/
+
+/* ---- Tempo paralelo 4 threads --------
+    real    0m16.896s
+    ser    0m0.015s
+    sys     0m0.077s
+*/
+
+/* ---- Tempo paralelo 8 threads --------
+    real    0m17.000s
+    user    0m0.030s
+    sys     0m0.046s
+*/
+
+/* ---- Tempo paralelo 16 threads --------
+    real    0m16.639s
+    user    0m0.061s
+    sys     0m0.046s
+*/
+
+/* ---- Tempo paralelo 32 threads --------
+    real    0m16.409s
+    user    0m0.030s
+    sys     0m0.015s
+*/
 
 #define _USE_MATH_DEFINES /* required for MS Visual C */
 #include <float.h>        /* DBL_MAX, DBL_MIN */
@@ -11,25 +46,74 @@
 #include <stdio.h>        /* printf */
 #include <stdlib.h>       /* rand */
 #include <string.h>       /* memset */
-#include <time.h>         /* time */
+#include <time.h>         /* time, clock */
 
 #ifdef _OPENMP
 #include <omp.h>
 #else
 #define omp_get_thread_num() 0
 #define omp_set_num_threads(n) ((void)0)
+#define omp_set_dynamic(n) ((void)0)
 #endif
 
 /* PARALLELIZACAO: tag para definir o numero de threads usadas pelo OpenMP.
    Pode ser alterada aqui ou sobrescrita na compilacao, por exemplo:
    gcc -fopenmp -DNUM_THREADS=8 Kmeans_cpu.c -o Kmeans_cpu */
 #ifndef NUM_THREADS
-#define NUM_THREADS 8
+#define NUM_THREADS 16
+#endif
+
+/* RANDOM_SEED=0 usa time(NULL). Para comparar execucoes, use uma semente fixa:
+   gcc -fopenmp -DNUM_THREADS=8 -DRANDOM_SEED=1 Kmeans_cpu.c -o Kmeans_cpu */
+#ifndef RANDOM_SEED
+#define RANDOM_SEED 0
 #endif
 
 static int getThreadCount()
 {
     return NUM_THREADS > 0 ? NUM_THREADS : 1;
+}
+
+static double getWallTime()
+{
+#ifdef _OPENMP
+    return omp_get_wtime();
+#else
+    return (double)clock() / CLOCKS_PER_SEC;
+#endif
+}
+
+static size_t getPaddedClusterStride(int k)
+{
+    /* MODIFICACAO PARA PARALELISMO:
+       cada thread guarda somas parciais de todos os clusters. Em vez de usar
+       exatamente k posicoes por thread, o bloco e alinhado para ocupar linhas
+       de cache separadas, reduzindo false sharing entre threads. */
+    const size_t cacheLineBytes = 64;
+    size_t stride = (size_t)k;
+    size_t elemsPerLine = cacheLineBytes / sizeof(double);
+
+    if (elemsPerLine > 0)
+    {
+        size_t remainder = stride % elemsPerLine;
+        if (remainder != 0)
+        {
+            stride += elemsPerLine - remainder;
+        }
+    }
+    return stride;
+}
+
+static void printBenchmark(size_t size, int k, double generatedAt,
+                           double clusteredAt, double finishedAt,
+                           double startedAt)
+{
+    fprintf(stderr, "\nBenchmark: size=%zu k=%d threads=%d\n", size, k,
+            getThreadCount());
+    fprintf(stderr, "geracao_dados: %.6f s\n", generatedAt - startedAt);
+    fprintf(stderr, "kmeans: %.6f s\n", clusteredAt - generatedAt);
+    fprintf(stderr, "printEPS: %.6f s\n", finishedAt - clusteredAt);
+    fprintf(stderr, "total_medido: %.6f s\n", finishedAt - startedAt);
 }
 
 typedef struct observation
@@ -39,7 +123,6 @@ typedef struct observation
     int group; /**< the group no in which this observation would go */
 } observation;
 
-
 typedef struct cluster
 {
     double x;     /**< abscissa centroid of this cluster */
@@ -47,8 +130,7 @@ typedef struct cluster
     size_t count; /**< count of observations present in this cluster */
 } cluster;
 
-
-int calculateNearst(observation* o, cluster clusters[], int k)
+int calculateNearst(observation *o, cluster clusters[], int k)
 {
     double minD = DBL_MAX;
     double dist = 0;
@@ -69,7 +151,7 @@ int calculateNearst(observation* o, cluster clusters[], int k)
 }
 
 void calculateCentroid(observation observations[], size_t size,
-                       cluster* centroid)
+                       cluster *centroid)
 {
     double sumX = 0;
     double sumY = 0;
@@ -77,8 +159,13 @@ void calculateCentroid(observation observations[], size_t size,
 
     centroid->count = size;
 
-    /* PARALLELIZACAO: reducao soma x/y em paralelo e atualiza cada ponto
-       independentemente, evitando disputa por memoria compartilhada. */
+    /* MODIFICACAO DO ALGORITMO ORIGINAL:
+       a soma do centroide, antes feita em um loop sequencial, foi transformada
+       em uma reducao paralela. O OpenMP cria somas locais de sumX/sumY para
+       cada thread e combina tudo no final.
+
+       O #pragma divide o vetor de observacoes entre as threads; como cada
+       iteracao altera apenas observations[i].group, nao ha disputa entre elas. */
 #pragma omp parallel for reduction(+ : sumX, sumY) num_threads(numThreads) schedule(static)
     for (size_t i = 0; i < size; i++)
     {
@@ -90,9 +177,9 @@ void calculateCentroid(observation observations[], size_t size,
     centroid->y = sumY / centroid->count;
 }
 
-cluster* kMeans(observation observations[], size_t size, int k)
+cluster *kMeans(observation observations[], size_t size, int k)
 {
-    cluster* clusters = NULL;
+    cluster *clusters = NULL;
     if (k <= 1)
     {
         /*
@@ -100,21 +187,35 @@ cluster* kMeans(observation observations[], size_t size, int k)
         then calculate centroid of observations and
         that will be a ingle cluster
         */
-        clusters = (cluster*)malloc(sizeof(cluster));
+        clusters = (cluster *)malloc(sizeof(cluster));
         memset(clusters, 0, sizeof(cluster));
         calculateCentroid(observations, size, clusters);
     }
     else if ((size_t)k < size)
     {
         int numThreads = getThreadCount();
-        size_t partialLen = (size_t)numThreads * (size_t)k;
-        double* partialX = (double*)calloc(partialLen, sizeof(double));
-        double* partialY = (double*)calloc(partialLen, sizeof(double));
-        size_t* partialCount = (size_t*)calloc(partialLen, sizeof(size_t));
+
+        /* MODIFICACAO DO ALGORITMO ORIGINAL:
+           no recalculo dos centroides, varias observacoes podem pertencer ao
+           mesmo cluster. Se todas as threads somassem diretamente em
+           clusters[i], seria necessario usar locks/atomic, criando muita
+           contencao.
+
+           Para evitar isso, cada thread acumula seus proprios valores em
+           partialX/partialY/partialCount. Depois essas somas parciais sao
+           combinadas para formar os centroides finais. */
+        size_t partialStride = getPaddedClusterStride(k);
+        size_t partialLen = (size_t)numThreads * partialStride;
+        double *partialX = (double *)calloc(partialLen, sizeof(double));
+        double *partialY = (double *)calloc(partialLen, sizeof(double));
+        size_t *partialCount = (size_t *)calloc(partialLen, sizeof(size_t));
 
         clusters = malloc(sizeof(cluster) * k);
         memset(clusters, 0, k * sizeof(cluster));
         /* STEP 1 */
+        /* A atribuicao inicial dos grupos foi mantida sequencial porque rand()
+           usa estado global; essa etapa acontece apenas uma vez e nao e o maior
+           custo do algoritmo. */
         for (size_t j = 0; j < size; j++)
         {
             observations[j].group = rand() % k;
@@ -122,30 +223,42 @@ cluster* kMeans(observation observations[], size_t size, int k)
         size_t changed = 0;
         size_t minAcceptedError =
             size /
-            10000;  // Do until 99.99 percent points are in correct cluster
+            10000; // Do until 99.99 percent points are in correct cluster
         do
         {
-            memset(partialX, 0, partialLen * sizeof(double));
-            memset(partialY, 0, partialLen * sizeof(double));
-            memset(partialCount, 0, partialLen * sizeof(size_t));
+            changed = 0; // this variable stores change in clustering
 
-            /* Initialize clusters */
-#pragma omp parallel for num_threads(numThreads) schedule(static)
-            for (int i = 0; i < k; i++)
-            {
-                clusters[i].x = 0;
-                clusters[i].y = 0;
-                clusters[i].count = 0;
-            }
+            /* MODIFICACAO DO ALGORITMO ORIGINAL:
+               cada iteracao do K-Means tinha varios loops sequenciais. Aqui uma
+               unica regiao paralela executa os passos de limpeza, acumulacao,
+               combinacao e reclassificacao, reduzindo o custo de criar/finalizar
+               threads varias vezes.
 
-            /* STEP 2*/
-            /* PARALLELIZACAO: cada thread acumula em um vetor parcial proprio,
-               evitando corrida ao somar x/y/count dos clusters compartilhados. */
-#pragma omp parallel num_threads(numThreads)
+               O reduction(+ : changed) permite que cada thread conte suas
+               mudancas localmente; o OpenMP soma esses valores no fim da regiao. */
+#pragma omp parallel num_threads(numThreads) reduction(+ : changed)
             {
                 int threadId = omp_get_thread_num();
-                size_t base = (size_t)threadId * (size_t)k;
+                size_t base = (size_t)threadId * partialStride;
 
+                /* O #pragma omp for divide entre as threads a limpeza dos
+                   acumuladores parciais usados nesta iteracao. */
+#pragma omp for schedule(static)
+                for (size_t idx = 0; idx < partialLen; idx++)
+                {
+                    partialX[idx] = 0;
+                    partialY[idx] = 0;
+                    partialCount[idx] = 0;
+                }
+
+                /* STEP 2*/
+                /* MODIFICACAO DO ALGORITMO ORIGINAL:
+                   em vez de atualizar o centroide global do cluster diretamente,
+                   cada thread grava apenas no seu bloco parcial. Assim, duas
+                   threads nunca escrevem na mesma posicao de
+                   partialX/partialY/partialCount.
+
+                   O #pragma omp for distribui as observacoes entre as threads. */
 #pragma omp for schedule(static)
                 for (size_t j = 0; j < size; j++)
                 {
@@ -154,52 +267,63 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     partialY[base + group] += observations[j].y;
                     partialCount[base + group]++;
                 }
-            }
 
-            /* PARALLELIZACAO: combina as somas parciais de cada thread por
-               cluster; como cada iteracao escreve em um cluster, nao ha corrida. */
-#pragma omp parallel for num_threads(numThreads) schedule(static)
-            for (int i = 0; i < k; i++)
-            {
-                double sumX = 0;
-                double sumY = 0;
-                size_t count = 0;
+                /* MODIFICACAO DO ALGORITMO ORIGINAL:
+                   foi adicionada uma etapa de reducao manual dos acumuladores
+                   parciais. Cada iteracao deste loop calcula um cluster final,
+                   somando os blocos de todas as threads.
 
-                for (int threadId = 0; threadId < numThreads; threadId++)
+                   O #pragma omp for paraleliza por cluster; como cada iteracao
+                   escreve em um indice diferente de clusters, nao ha corrida. */
+#pragma omp for schedule(static)
+                for (int i = 0; i < k; i++)
                 {
-                    size_t idx = (size_t)threadId * (size_t)k + (size_t)i;
-                    sumX += partialX[idx];
-                    sumY += partialY[idx];
-                    count += partialCount[idx];
+                    double sumX = 0;
+                    double sumY = 0;
+                    size_t count = 0;
+
+                    for (int partialThread = 0; partialThread < numThreads;
+                         partialThread++)
+                    {
+                        size_t idx =
+                            (size_t)partialThread * partialStride + (size_t)i;
+                        sumX += partialX[idx];
+                        sumY += partialY[idx];
+                        count += partialCount[idx];
+                    }
+
+                    clusters[i].x = sumX;
+                    clusters[i].y = sumY;
+                    clusters[i].count = count;
+
+                    if (clusters[i].count > 0)
+                    {
+                        clusters[i].x /= clusters[i].count;
+                        clusters[i].y /= clusters[i].count;
+                    }
                 }
 
-                clusters[i].x = sumX;
-                clusters[i].y = sumY;
-                clusters[i].count = count;
+                /* STEP 3 and 4 */
+                /* MODIFICACAO DO ALGORITMO ORIGINAL:
+                   a busca pelo centroide mais proximo foi paralelizada porque a
+                   nova classe de uma observacao independe das demais. Cada
+                   thread atualiza apenas observations[j].
 
-                if (clusters[i].count > 0)
+                   O #pragma omp for divide as observacoes; a variavel changed
+                   ja esta protegida pelo reduction da regiao paralela. */
+#pragma omp for schedule(static)
+                for (size_t j = 0; j < size; j++)
                 {
-                    clusters[i].x /= clusters[i].count;
-                    clusters[i].y /= clusters[i].count;
+                    int nearest = calculateNearst(observations + j, clusters, k);
+                    if (nearest != observations[j].group)
+                    {
+                        changed++;
+                        observations[j].group = nearest;
+                    }
                 }
             }
-
-            /* STEP 3 and 4 */
-            changed = 0;  // this variable stores change in clustering
-            /* PARALLELIZACAO: cada ponto e reclassificado de forma independente;
-               reduction soma com seguranca quantos pontos mudaram de grupo. */
-#pragma omp parallel for reduction(+ : changed) num_threads(numThreads) schedule(static)
-            for (size_t j = 0; j < size; j++)
-            {
-                int nearest = calculateNearst(observations + j, clusters, k);
-                if (nearest != observations[j].group)
-                {
-                    changed++;
-                    observations[j].group = nearest;
-                }
-            }
-        } while (changed > minAcceptedError);  // Keep on grouping until we have
-                                               // got almost best clustering
+        } while (changed > minAcceptedError); // Keep on grouping until we have
+                                              // got almost best clustering
 
         free(partialX);
         free(partialY);
@@ -210,10 +334,12 @@ cluster* kMeans(observation observations[], size_t size, int k)
         /* If no of clusters is more than observations
            each observation can be its own cluster
         */
-        clusters = (cluster*)malloc(sizeof(cluster) * k);
+        clusters = (cluster *)malloc(sizeof(cluster) * k);
         memset(clusters, 0, k * sizeof(cluster));
-        /* PARALLELIZACAO: caso trivial, cada iteracao escreve em indices
-           independentes de clusters/observations. */
+        /* MODIFICACAO DO ALGORITMO ORIGINAL:
+           no caso trivial, cada observacao vira seu proprio cluster. O loop foi
+           paralelizado porque cada iteracao escreve em indices independentes de
+           clusters e observations. */
 #pragma omp parallel for num_threads(getThreadCount()) schedule(static)
         for (size_t j = 0; j < size; j++)
         {
@@ -226,13 +352,12 @@ cluster* kMeans(observation observations[], size_t size, int k)
     return clusters;
 }
 
-
 void printEPS(observation pts[], size_t len, cluster cent[], int k)
 {
     int W = 400, H = 400;
     double min_x = DBL_MAX, max_x = DBL_MIN, min_y = DBL_MAX, max_y = DBL_MIN;
     double scale = 0, cx = 0, cy = 0;
-    double* colors = (double*)malloc(sizeof(double) * (k * 3));
+    double *colors = (double *)malloc(sizeof(double) * (k * 3));
     int i;
     size_t j;
     double kd = k * 1.0;
@@ -300,12 +425,12 @@ void printEPS(observation pts[], size_t len, cluster cent[], int k)
     free(colors);
 }
 
-
 static void test()
 {
     size_t size = 100000L;
-    observation* observations =
-        (observation*)malloc(sizeof(observation) * size);
+    double startedAt = getWallTime();
+    observation *observations =
+        (observation *)malloc(sizeof(observation) * size);
     double maxRadius = 20.00;
     double radius = 0;
     double ang = 0;
@@ -317,20 +442,24 @@ static void test()
         observations[i].x = radius * cos(ang);
         observations[i].y = radius * sin(ang);
     }
-    int k = 5;  // No of clusters
-    cluster* clusters = kMeans(observations, size, k);
+    double generatedAt = getWallTime();
+    int k = 5; // No of clusters
+    cluster *clusters = kMeans(observations, size, k);
+    double clusteredAt = getWallTime();
     printEPS(observations, size, clusters, k);
+    double finishedAt = getWallTime();
+    printBenchmark(size, k, generatedAt, clusteredAt, finishedAt, startedAt);
     // Free the accquired memory
     free(observations);
     free(clusters);
 }
 
-
 void test2()
 {
     size_t size = 1000000L;
-    observation* observations =
-        (observation*)malloc(sizeof(observation) * size);
+    double startedAt = getWallTime();
+    observation *observations =
+        (observation *)malloc(sizeof(observation) * size);
     double maxRadius = 20.00;
     double radius = 0;
     double ang = 0;
@@ -342,9 +471,13 @@ void test2()
         observations[i].x = radius * cos(ang);
         observations[i].y = radius * sin(ang);
     }
-    int k = 11;  // No of clusters
-    cluster* clusters = kMeans(observations, size, k);
+    double generatedAt = getWallTime();
+    int k = 11; // No of clusters
+    cluster *clusters = kMeans(observations, size, k);
+    double clusteredAt = getWallTime();
     printEPS(observations, size, clusters, k);
+    double finishedAt = getWallTime();
+    printBenchmark(size, k, generatedAt, clusteredAt, finishedAt, startedAt);
     // Free the accquired memory
     free(observations);
     free(clusters);
@@ -357,9 +490,14 @@ void test2()
 int main()
 {
     /* PARALLELIZACAO: aplica a tag NUM_THREADS ao runtime do OpenMP. */
+    omp_set_dynamic(0);
     omp_set_num_threads(getThreadCount());
+#if RANDOM_SEED
+    srand(RANDOM_SEED);
+#else
     srand(time(NULL));
+#endif
     // test();
-    test2(); 
+    test2();
     return 0;
 }
