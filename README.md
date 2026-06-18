@@ -58,7 +58,7 @@ gcc -O0 src/Kmeans.c -o bin/Kmeans_seq_O0 -lm
 Versao OpenMP:
 
 ```bash
-gcc -O0 -fopenmp -DNUM_THREADS=32 src/Kmeans_cpu.c -o bin/Kmeans_cpu_omp -lm
+gcc -O0 -fopenmp src/Kmeans_cpu.c -o bin/Kmeans_cpu_omp -lm
 ```
 
 Versao CUDA:

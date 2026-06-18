@@ -60,7 +60,7 @@
    Pode ser alterada aqui ou sobrescrita na compilacao, por exemplo:
    gcc -fopenmp -DNUM_THREADS=8 Kmeans_cpu.c -o Kmeans_cpu */
 #ifndef NUM_THREADS
-#define NUM_THREADS 16
+#define NUM_THREADS 32
 #endif
 
 /* RANDOM_SEED=0 usa time(NULL). Para comparar execucoes, use uma semente fixa:
