@@ -1,5 +1,11 @@
 # Relatorio - K-Means Sequencial, OpenMP, OpenMP GPU e CUDA
 
+## Alunos 
+
+- André Luiz Rocha Cabral
+- João Paulo Dias
+- Victor Sousa Lima
+
 ## Objetivo
 
 Este relatorio compara quatro versoes do algoritmo K-Means:
@@ -75,9 +81,6 @@ Versao CUDA:
 nvcc -O0 -arch=sm_89 src/Kmeans_cuda.cu -o bin/Kmeans_cuda
 time ./bin/Kmeans_cuda > /dev/null
 ```
-
-O aviso do CUDA sobre a funcao `test` nao ser usada nao afeta a execucao, pois
-o `main` chama `test2()`.
 
 ## Tempo externo (`time`)
 
@@ -310,8 +313,3 @@ mais eficiente. A versao OpenMP em CPU apresentou bom ganho com poucas threads,
 mas perdeu eficiencia ao aumentar demais a quantidade de threads. A versao
 OpenMP GPU funcionou corretamente com offload, porem ainda precisa de
 otimizacoes para competir com CUDA.
-
-Como melhoria futura para uma comparacao mais precisa, recomenda-se adicionar
-uma opcao para desativar `printEPS()` durante os benchmarks. Assim seria possivel
-medir apenas o tempo do algoritmo K-Means, sem o custo de geracao da
-visualizacao EPS.
