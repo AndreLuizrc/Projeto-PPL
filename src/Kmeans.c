@@ -4,7 +4,6 @@
     sys     0m0.062s
 */
 
-
 #define _USE_MATH_DEFINES /* required for MS Visual C */
 #include <float.h>        /* DBL_MAX, DBL_MIN */
 #include <math.h>         /* PI, sin, cos */
@@ -20,7 +19,6 @@ typedef struct observation
     int group; /**< the group no in which this observation would go */
 } observation;
 
-
 typedef struct cluster
 {
     double x;     /**< abscissa centroid of this cluster */
@@ -28,8 +26,7 @@ typedef struct cluster
     size_t count; /**< count of observations present in this cluster */
 } cluster;
 
-
-int calculateNearst(observation* o, cluster clusters[], int k)
+int calculateNearst(observation *o, cluster clusters[], int k)
 {
     double minD = DBL_MAX;
     double dist = 0;
@@ -50,7 +47,7 @@ int calculateNearst(observation* o, cluster clusters[], int k)
 }
 
 void calculateCentroid(observation observations[], size_t size,
-                       cluster* centroid)
+                       cluster *centroid)
 {
     size_t i = 0;
     centroid->x = 0;
@@ -66,9 +63,9 @@ void calculateCentroid(observation observations[], size_t size,
     centroid->y /= centroid->count;
 }
 
-cluster* kMeans(observation observations[], size_t size, int k)
+cluster *kMeans(observation observations[], size_t size, int k)
 {
-    cluster* clusters = NULL;
+    cluster *clusters = NULL;
     if (k <= 1)
     {
         /*
@@ -76,7 +73,7 @@ cluster* kMeans(observation observations[], size_t size, int k)
         then calculate centroid of observations and
         that will be a ingle cluster
         */
-        clusters = (cluster*)malloc(sizeof(cluster));
+        clusters = (cluster *)malloc(sizeof(cluster));
         memset(clusters, 0, sizeof(cluster));
         calculateCentroid(observations, size, clusters);
     }
@@ -92,7 +89,7 @@ cluster* kMeans(observation observations[], size_t size, int k)
         size_t changed = 0;
         size_t minAcceptedError =
             size /
-            10000;  // Do until 99.99 percent points are in correct cluster
+            10000; // Do until 99.99 percent points are in correct cluster
         int t = 0;
         do
         {
@@ -117,7 +114,7 @@ cluster* kMeans(observation observations[], size_t size, int k)
                 clusters[i].y /= clusters[i].count;
             }
             /* STEP 3 and 4 */
-            changed = 0;  // this variable stores change in clustering
+            changed = 0; // this variable stores change in clustering
             for (size_t j = 0; j < size; j++)
             {
                 t = calculateNearst(observations + j, clusters, k);
@@ -127,15 +124,15 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     observations[j].group = t;
                 }
             }
-        } while (changed > minAcceptedError);  // Keep on grouping until we have
-                                               // got almost best clustering
+        } while (changed > minAcceptedError); // Keep on grouping until we have
+                                              // got almost best clustering
     }
     else
     {
         /* If no of clusters is more than observations
            each observation can be its own cluster
         */
-        clusters = (cluster*)malloc(sizeof(cluster) * k);
+        clusters = (cluster *)malloc(sizeof(cluster) * k);
         memset(clusters, 0, k * sizeof(cluster));
         for (int j = 0; j < size; j++)
         {
@@ -148,13 +145,12 @@ cluster* kMeans(observation observations[], size_t size, int k)
     return clusters;
 }
 
-
 void printEPS(observation pts[], size_t len, cluster cent[], int k)
 {
     int W = 400, H = 400;
     double min_x = DBL_MAX, max_x = DBL_MIN, min_y = DBL_MAX, max_y = DBL_MIN;
     double scale = 0, cx = 0, cy = 0;
-    double* colors = (double*)malloc(sizeof(double) * (k * 3));
+    double *colors = (double *)malloc(sizeof(double) * (k * 3));
     int i;
     size_t j;
     double kd = k * 1.0;
@@ -222,12 +218,11 @@ void printEPS(observation pts[], size_t len, cluster cent[], int k)
     free(colors);
 }
 
-
 static void test()
 {
     size_t size = 100000L;
-    observation* observations =
-        (observation*)malloc(sizeof(observation) * size);
+    observation *observations =
+        (observation *)malloc(sizeof(observation) * size);
     double maxRadius = 20.00;
     double radius = 0;
     double ang = 0;
@@ -239,20 +234,19 @@ static void test()
         observations[i].x = radius * cos(ang);
         observations[i].y = radius * sin(ang);
     }
-    int k = 5;  // No of clusters
-    cluster* clusters = kMeans(observations, size, k);
+    int k = 5; // No of clusters
+    cluster *clusters = kMeans(observations, size, k);
     printEPS(observations, size, clusters, k);
     // Free the accquired memory
     free(observations);
     free(clusters);
 }
 
-
 void test2()
 {
-    size_t size = 1000000L;
-    observation* observations =
-        (observation*)malloc(sizeof(observation) * size);
+    size_t size = 5000000L;
+    observation *observations =
+        (observation *)malloc(sizeof(observation) * size);
     double maxRadius = 20.00;
     double radius = 0;
     double ang = 0;
@@ -264,8 +258,8 @@ void test2()
         observations[i].x = radius * cos(ang);
         observations[i].y = radius * sin(ang);
     }
-    int k = 11;  // No of clusters
-    cluster* clusters = kMeans(observations, size, k);
+    int k = 11; // No of clusters
+    cluster *clusters = kMeans(observations, size, k);
     printEPS(observations, size, clusters, k);
     // Free the accquired memory
     free(observations);
@@ -280,6 +274,6 @@ int main()
 {
     srand(time(NULL));
     // test();
-    test2(); 
+    test2();
     return 0;
 }

@@ -1,0 +1,20 @@
+# Build artifacts
+bin/
+*.exe
+*.o
+*.obj
+*.out
+*.ilk
+*.pdb
+*.exp
+*.lib
+
+# Generated outputs
+outputs/
+*.eps
+
+# Local/editor files
+.vscode/
+.idea/
+*.swp
+*~

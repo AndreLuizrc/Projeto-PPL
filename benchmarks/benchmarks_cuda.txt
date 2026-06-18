@@ -1,0 +1,70 @@
+# Benchmarks - K-Means CUDA
+
+## Parametros usados
+
+- Arquivo: src/Kmeans_cuda.cu
+- Funcao executada no main: test2()
+- Quantidade de observacoes: 5.000.000
+- Numero de clusters: k = 11
+- Raio maximo para geracao dos pontos: 20.00
+- Tamanho do bloco CUDA: 256 threads
+- Arquitetura CUDA: sm_89
+- Otimizacao: -O0
+- Saida: stdout redirecionado para /dev/null
+
+## Comandos
+
+```bash
+nvcc -O0 -arch=sm_89 src/Kmeans_cuda.cu -o bin/Kmeans_cuda
+time ./bin/Kmeans_cuda > /dev/null
+```
+
+O aviso sobre a funcao `test` nao ser usada nao afeta o resultado, pois o
+programa executa `test2()`.
+
+## Benchmark CUDA informado pelo programa
+
+```text
+Benchmark CUDA: size=5000000 k=11 block=256
+geracao_dados: 0.287319 s
+kmeans_cuda: 1.750357 s
+printEPS: 1.751729 s
+total_medido: 3.789405 s
+```
+
+## Percentual do tempo interno
+
+| Etapa | Tempo (s) | Percentual |
+| --- | ---: | ---: |
+| geracao_dados | 0.287319 | 7.58% |
+| kmeans_cuda | 1.750357 | 46.19% |
+| printEPS | 1.751729 | 46.23% |
+| total_medido | 3.789405 | 100.00% |
+
+## Tempo externo pelo comando time
+
+```text
+real    0m3.979s
+user    0m3.617s
+sys     0m0.189s
+```
+
+`real` e o tempo total percebido pelo usuario. `user` e o tempo de CPU gasto em
+modo usuario. `sys` e o tempo de CPU gasto pelo sistema operacional.
+
+## Comparacao com a rodada atual
+
+| Versao | real (s) | Speedup vs sequencial |
+| --- | ---: | ---: |
+| Sequencial -O0 | 19.531 | 1.00x |
+| OpenMP 32 threads -O0 | 9.590 | 2.04x |
+| CUDA -O0 | 3.979 | 4.91x |
+
+Nesta rodada, a versao CUDA foi 4.91x mais rapida que a sequencial e 2.41x mais
+rapida que a OpenMP no tempo total (`real`).
+
+## Observacao sobre /dev/null
+
+Redirecionar para `/dev/null` evita gravar um EPS grande em disco, mas a funcao
+`printEPS()` ainda e executada. Portanto, o benchmark ainda inclui o custo de
+formatar a visualizacao dos 5.000.000 pontos.

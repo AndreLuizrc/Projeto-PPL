@@ -456,7 +456,7 @@ static void test()
 
 void test2()
 {
-    size_t size = 1000000L;
+    size_t size = 5000000L;
     double startedAt = getWallTime();
     observation *observations =
         (observation *)malloc(sizeof(observation) * size);
