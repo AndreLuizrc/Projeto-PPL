@@ -39,6 +39,13 @@
 #define THREAD_LIMIT 128
 #endif
 
+/* Limite usado para manter acumuladores locais por thread no device. O teste
+   principal usa k = 11; se k passar deste limite, o codigo usa o caminho
+   generico com acumuladores parciais em memoria global. */
+#ifndef LOCAL_CLUSTER_LIMIT
+#define LOCAL_CLUSTER_LIMIT 16
+#endif
+
 /* RANDOM_SEED=0 usa time(NULL). Para comparar execucoes, use uma semente fixa:
    gcc -fopenmp -DRANDOM_SEED=1 Kmeans_gpu_openmp.c -o Kmeans_gpu_openmp */
 #ifndef RANDOM_SEED
@@ -118,13 +125,10 @@ void calculateCentroid(observation observations[], size_t size,
     centroid->count = size;
 
     /* MODIFICACAO PARA GPU:
-       a soma do centroide, antes feita em um loop sequencial, foi movida para
-       uma regiao OpenMP target. O vetor observations e copiado para o
-       dispositivo e volta atualizado, pois cada ponto recebe group = 0.
-
-       O reduction(+ : sumX, sumY) cria acumuladores privados no dispositivo e
-       combina o resultado no fim da regiao target. */
-#pragma omp target teams distribute parallel for reduction(+ : sumX, sumY) map(tofrom : observations[0:size]) num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
+       no caso k <= 1, o custo nao e dominante para o benchmark principal.
+       Mantemos esta etapa no host para evitar gerar reducoes compostas no
+       target NVPTX, que podem exigir atomics de 16 bytes em algumas versoes do
+       GCC offload. */
     for (size_t i = 0; i < size; i++)
     {
         sumX += observations[i].x;
@@ -154,10 +158,16 @@ cluster *kMeans(observation observations[], size_t size, int k)
         /* MODIFICACAO PARA GPU:
            os centroides foram separados em tres vetores simples. Esse formato
            e mais facil de mapear para o dispositivo do que atualizar um vetor
-           de structs diretamente e tambem simplifica o uso de atomics. */
+           de structs diretamente. */
         double *clusterX = (double *)calloc((size_t)k, sizeof(double));
         double *clusterY = (double *)calloc((size_t)k, sizeof(double));
         size_t *clusterCount = (size_t *)calloc((size_t)k, sizeof(size_t));
+        int partialBins = NUM_TEAMS * THREAD_LIMIT;
+        size_t partialLen = (size_t)partialBins * (size_t)k;
+        double *partialX = (double *)calloc(partialLen, sizeof(double));
+        double *partialY = (double *)calloc(partialLen, sizeof(double));
+        unsigned int *partialCount =
+            (unsigned int *)calloc(partialLen, sizeof(unsigned int));
 
         clusters = malloc(sizeof(cluster) * k);
         memset(clusters, 0, k * sizeof(cluster));
@@ -170,67 +180,143 @@ cluster *kMeans(observation observations[], size_t size, int k)
         {
             observations[j].group = rand() % k;
         }
-        size_t changed = 0;
-        size_t minAcceptedError =
-            size /
-            10000; // Do until 99.99 percent points are in correct cluster
+        unsigned int changed = 0;
+        unsigned int minAcceptedError =
+            (unsigned int)(size /
+                           10000); // Do until 99.99 percent points are in correct cluster
 
         /* MODIFICACAO PARA GPU:
            mantemos observations e os vetores dos centroides alocados no
            dispositivo durante todo o loop do K-Means. Assim evitamos copiar
            1.000.000 de observacoes entre CPU e GPU a cada iteracao. */
-#pragma omp target data map(tofrom : observations[0:size]) map(alloc : clusterX[0:k], clusterY[0:k], clusterCount[0:k])
+#pragma omp target data map(tofrom : observations[0 : size]) map(alloc : clusterX[0 : k], clusterY[0 : k], clusterCount[0 : k], partialX[0 : partialLen], partialY[0 : partialLen], partialCount[0 : partialLen])
         {
             do
             {
                 changed = 0; // this variable stores change in clustering
 
-                /* Initialize clusters */
-                /* MODIFICACAO PARA GPU:
-                   a limpeza dos acumuladores dos clusters foi movida para o
-                   dispositivo. Cada indice e independente, entao o loop pode
-                   ser distribuido entre teams e threads da GPU. */
-#pragma omp target teams distribute parallel for num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
-                for (int i = 0; i < k; i++)
-                {
-                    clusterX[i] = 0;
-                    clusterY[i] = 0;
-                    clusterCount[i] = 0;
-                }
-
                 /* STEP 2*/
                 /* MODIFICACAO PARA GPU:
-                   cada observacao contribui para o somatorio do cluster ao qual
-                   pertence. Como varias threads podem atingir o mesmo cluster,
-                   as atualizacoes usam atomic para evitar corrida de dados.
-
-                   Para este projeto, k e pequeno em relacao ao numero de
-                   observacoes, entao essa versao prioriza clareza e
-                   portabilidade do OpenMP offload. */
+                   cada thread do dispositivo acumula em uma faixa privada de
+                   partialX/partialY/partialCount. Isso evita atomics no NVPTX
+                   e tambem evita varrer todas as observacoes varias vezes por
+                   cluster. */
 #pragma omp target teams distribute parallel for num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
-                for (size_t j = 0; j < size; j++)
+                for (size_t idx = 0; idx < partialLen; idx++)
                 {
-                    int group = observations[j].group;
-#pragma omp atomic update
-                    clusterX[group] += observations[j].x;
-#pragma omp atomic update
-                    clusterY[group] += observations[j].y;
-#pragma omp atomic update
-                    clusterCount[group] += 1;
+                    partialX[idx] = 0;
+                    partialY[idx] = 0;
+                    partialCount[idx] = 0;
+                }
+
+                if (k <= LOCAL_CLUSTER_LIMIT)
+                {
+                    /* Caminho rapido para o caso do projeto: cada thread
+                       acumula todos os clusters em registradores/memoria local
+                       e grava seus parciais uma unica vez no fim do bloco. */
+#pragma omp target teams distribute num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
+                    for (int chunk = 0; chunk < NUM_TEAMS; chunk++)
+                    {
+                        size_t chunkSize =
+                            (size + (size_t)NUM_TEAMS - 1) / (size_t)NUM_TEAMS;
+                        size_t begin = (size_t)chunk * chunkSize;
+                        size_t end = begin + chunkSize;
+
+                        if (end > size)
+                        {
+                            end = size;
+                        }
+
+#pragma omp parallel num_threads(THREAD_LIMIT)
+                        {
+                            int bin =
+                                chunk * THREAD_LIMIT + omp_get_thread_num();
+                            double localX[LOCAL_CLUSTER_LIMIT];
+                            double localY[LOCAL_CLUSTER_LIMIT];
+                            unsigned int localCount[LOCAL_CLUSTER_LIMIT];
+
+                            for (int i = 0; i < k; i++)
+                            {
+                                localX[i] = 0;
+                                localY[i] = 0;
+                                localCount[i] = 0;
+                            }
+
+#pragma omp for
+                            for (size_t j = begin; j < end; j++)
+                            {
+                                int group = observations[j].group;
+                                localX[group] += observations[j].x;
+                                localY[group] += observations[j].y;
+                                localCount[group]++;
+                            }
+
+                            if (bin < partialBins)
+                            {
+                                for (int i = 0; i < k; i++)
+                                {
+                                    size_t idx =
+                                        (size_t)bin * (size_t)k + (size_t)i;
+                                    partialX[idx] = localX[i];
+                                    partialY[idx] = localY[i];
+                                    partialCount[idx] = localCount[i];
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    /* Caminho generico para k maior que LOCAL_CLUSTER_LIMIT:
+                       ainda evita atomics, mas escreve os parciais em memoria
+                       global durante a varredura. */
+#pragma omp target teams distribute parallel for num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
+                    for (size_t j = 0; j < size; j++)
+                    {
+                        int group = observations[j].group;
+                        int bin = omp_get_team_num() * THREAD_LIMIT +
+                                  omp_get_thread_num();
+
+                        if (bin < partialBins)
+                        {
+                            size_t idx =
+                                (size_t)bin * (size_t)k + (size_t)group;
+                            partialX[idx] += observations[j].x;
+                            partialY[idx] += observations[j].y;
+                            partialCount[idx]++;
+                        }
+                    }
                 }
 
                 /* MODIFICACAO PARA GPU:
-                   depois da soma, os valores acumulados sao divididos pela
-                   quantidade de pontos de cada cluster ainda no dispositivo.
-                   A verificacao count > 0 evita divisao por zero caso algum
-                   cluster fique vazio durante uma iteracao. */
+                   combina os acumuladores privados em um centroide por
+                   cluster. O custo e proporcional a NUM_TEAMS * THREAD_LIMIT *
+                   k, bem menor que repetir a varredura dos pontos por cluster. */
 #pragma omp target teams distribute parallel for num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
                 for (int i = 0; i < k; i++)
                 {
-                    if (clusterCount[i] > 0)
+                    double sumX = 0;
+                    double sumY = 0;
+                    unsigned int count = 0;
+
+                    for (int bin = 0; bin < partialBins; bin++)
                     {
-                        clusterX[i] /= clusterCount[i];
-                        clusterY[i] /= clusterCount[i];
+                        size_t idx = (size_t)bin * (size_t)k + (size_t)i;
+                        sumX += partialX[idx];
+                        sumY += partialY[idx];
+                        count += partialCount[idx];
+                    }
+
+                    clusterCount[i] = count;
+                    if (count > 0)
+                    {
+                        clusterX[i] = sumX / count;
+                        clusterY[i] = sumY / count;
+                    }
+                    else
+                    {
+                        clusterX[i] = 0;
+                        clusterY[i] = 0;
                     }
                 }
 
@@ -273,7 +359,7 @@ cluster *kMeans(observation observations[], size_t size, int k)
                os centroides finais sao copiados de volta uma unica vez, apos a
                convergencia. As observacoes voltam automaticamente ao sair da
                regiao target data por causa do map(tofrom). */
-#pragma omp target update from(clusterX[0:k], clusterY[0:k], clusterCount[0:k])
+#pragma omp target update from(clusterX[0 : k], clusterY[0 : k], clusterCount[0 : k])
         }
 
         for (int i = 0; i < k; i++)
@@ -286,6 +372,9 @@ cluster *kMeans(observation observations[], size_t size, int k)
         free(clusterX);
         free(clusterY);
         free(clusterCount);
+        free(partialX);
+        free(partialY);
+        free(partialCount);
     }
     else
     {
@@ -298,7 +387,7 @@ cluster *kMeans(observation observations[], size_t size, int k)
            no caso trivial, cada observacao vira seu proprio cluster. O loop foi
            movido para a GPU porque cada iteracao escreve em indices
            independentes de clusters e observations. */
-#pragma omp target teams distribute parallel for map(tofrom : observations[0:size], clusters[0:k]) num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
+#pragma omp target teams distribute parallel for map(tofrom : observations[0 : size], clusters[0 : k]) num_teams(NUM_TEAMS) thread_limit(THREAD_LIMIT)
         for (size_t j = 0; j < size; j++)
         {
             clusters[j].x = observations[j].x;
@@ -414,7 +503,7 @@ static void test()
 
 void test2()
 {
-    size_t size = 1000000L;
+    size_t size = 5000000L;
     double startedAt = getWallTime();
     observation *observations =
         (observation *)malloc(sizeof(observation) * size);

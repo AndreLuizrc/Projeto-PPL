@@ -4,6 +4,7 @@ Este projeto compara tres implementacoes do algoritmo K-Means:
 
 - `src/Kmeans.c`: versao sequencial em CPU.
 - `src/Kmeans_cpu.c`: versao paralela em CPU com OpenMP.
+- `src/Kmeans_gpu_openmp.c`: versao paralela em GPU com OpenMP target/offload.
 - `src/Kmeans_cuda.cu`: versao paralela em GPU com CUDA.
 
 O `main` das versoes executa `test2()`, que gera 2.000.000 observacoes,
@@ -61,6 +62,16 @@ Versao OpenMP:
 gcc -O0 -fopenmp src/Kmeans_cpu.c -o bin/Kmeans_cpu_omp -lm
 ```
 
+Versao OpenMP com offload para GPU:
+
+```bash
+gcc -O2 -fopenmp -foffload=nvptx-none src/Kmeans_gpu_openmp.c -o bin/Kmeans_gpu_openmp -lm
+```
+
+Se o compilador nao tiver um dispositivo OpenMP configurado, as regioes
+`target` podem executar no host como fallback. Para confirmar se o runtime
+encontrou GPU, veja no benchmark impresso em `stderr` o campo `devices`.
+
 Versao CUDA:
 
 ```bash
@@ -81,6 +92,7 @@ redirecionar a saida para arquivo:
 ```bash
 time ./bin/Kmeans_seq > outputs/saida_seq.eps
 time ./bin/Kmeans_cpu_omp > outputs/saida_cpu_omp.eps
+time ./bin/Kmeans_gpu_openmp > outputs/saida_gpu_openmp.eps
 time ./bin/Kmeans_cuda > outputs/saida_cuda.eps
 ```
 
@@ -93,6 +105,7 @@ para `/dev/null`:
 ```bash
 time ./bin/Kmeans_seq > /dev/null
 time ./bin/Kmeans_cpu_omp > /dev/null
+time ./bin/Kmeans_gpu_openmp > /dev/null
 time ./bin/Kmeans_cuda > /dev/null
 ```
 
